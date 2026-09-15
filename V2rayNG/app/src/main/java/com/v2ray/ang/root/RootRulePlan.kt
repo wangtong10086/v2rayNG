@@ -88,8 +88,17 @@ internal object RootRulePlan {
         val table = if (rejectV6) "filter" else "mangle"
         val command = if (ipv6) "ip6tables-restore" else "iptables-restore"
         val selectedUids = selected.filter { (it.toIntOrNull() ?: -1) >= 0 }.distinct().sortedBy { it.toInt() }
-        val target = if (rejectV6) "REJECT --reject-with icmp6-adm-prohibited" else "MARK --set-xmark $MARK"
+        val targets = if (rejectV6) listOf(
+            "-p tcp -j REJECT --reject-with tcp-reset",
+            "-j REJECT --reject-with icmp6-adm-prohibited",
+        ) else listOf("-j MARK --set-xmark $MARK")
         return batch(command, table, chain) {
+            if (rejectV6) {
+                // Linux sends local rejection replies through OUTPUT without an app socket.
+                // Preserve their loopback path while blocking IPv6, or this chain drops its
+                // own replies and TCP waits for retransmission timeouts instead of failing.
+                appendLine("-A $chain -o lo -j RETURN")
+            }
             appendLine("-A $chain -m owner --uid-owner $appUid -j RETURN")
             // Android's protected sockets and explicit infrastructure UIDs must retain their network.
             appendLine("-A $chain -m mark --mark 0x20000/0x20000 -j RETURN")
@@ -98,9 +107,9 @@ internal object RootRulePlan {
             if (perApp && bypass) selectedUids.forEach {
                 appendLine("-A $chain -m owner --uid-owner $it -j RETURN")
             }
-            if (perApp && !bypass) selectedUids.forEach {
-                appendLine("-A $chain -m owner --uid-owner $it -j $target")
-            } else appendLine("-A $chain -j $target")
+            if (perApp && !bypass) selectedUids.forEach { uid ->
+                targets.forEach { appendLine("-A $chain -m owner --uid-owner $uid $it") }
+            } else targets.forEach { appendLine("-A $chain $it") }
             appendLine("-A OUTPUT -j $chain")
         }
     }

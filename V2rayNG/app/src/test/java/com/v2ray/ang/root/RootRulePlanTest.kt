@@ -22,6 +22,44 @@ class RootRulePlanTest {
         assertTrue(script.indexOf("uid-owner 10221 -j RETURN") < script.indexOf("-j REJECT"))
         assertFalse(script.contains("MARK"))
     }
+    @Test fun `IPv6 blocking permits local rejection replies before rejecting TCP`() {
+        val script = RootRulePlan.capture(true, true, "TEST6", 10208, false, false, emptyList())
+        val loopback = script.indexOf("-A TEST6 -o lo -j RETURN")
+        val reset = script.indexOf("-A TEST6 -p tcp -j REJECT --reject-with tcp-reset")
+        val otherProtocols = script.indexOf("-A TEST6 -j REJECT --reject-with icmp6-adm-prohibited")
+        assertTrue(loopback >= 0)
+        assertTrue(loopback < reset)
+        assertTrue(reset < otherProtocols)
+        assertEquals(2, script.lines().count { it.contains("-j REJECT") })
+        assertTrue(script.indexOf("ff00::/8 -j RETURN") < reset)
+    }
+    @Test fun `IPv6 rejection remains scoped to selected application UIDs`() {
+        val script = RootRulePlan.capture(true, true, "TEST6", 10208, true, false,
+            listOf("10221", "10221", "invalid"))
+        val rejectionRules = script.lines().filter { it.contains("-j REJECT") }
+        assertEquals(listOf(
+            "-A TEST6 -m owner --uid-owner 10221 -p tcp -j REJECT --reject-with tcp-reset",
+            "-A TEST6 -m owner --uid-owner 10221 -j REJECT --reject-with icmp6-adm-prohibited",
+        ), rejectionRules)
+        val empty = RootRulePlan.capture(true, true, "TEST6", 10208, true, false, emptyList())
+        assertFalse(empty.contains("-j REJECT"))
+    }
+    @Test fun `bypassed applications precede both IPv6 rejection protocols`() {
+        val script = RootRulePlan.capture(true, true, "TEST6", 10208, true, true, listOf("10221"))
+        val bypass = script.indexOf("-A TEST6 -m owner --uid-owner 10221 -j RETURN")
+        assertTrue(bypass >= 0)
+        assertTrue(bypass < script.indexOf("-p tcp -j REJECT"))
+        assertTrue(bypass < script.indexOf("-j REJECT --reject-with icmp6-adm-prohibited"))
+    }
+    @Test fun `enabled IPv6 and IPv4 retain marking instead of rejection rules`() {
+        for (ipv6 in listOf(false, true)) {
+            val script = RootRulePlan.capture(ipv6, false, "TEST", 10208, false, false, emptyList())
+            assertTrue(script.contains("*mangle"))
+            assertTrue(script.contains("-j MARK --set-xmark"))
+            assertFalse(script.contains("-j REJECT"))
+            assertFalse(script.contains("-o lo"))
+        }
+    }
     @Test fun `DNS captures both transports but leaves tailnet and other network IDs alone`() {
         val script = RootRulePlan.dns(10208, 10853, 106, false)
         assertTrue(script.contains("--mark 106/0xffff -p udp --dport 53"))
