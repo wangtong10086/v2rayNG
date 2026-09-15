@@ -47,6 +47,12 @@ internal object RootRulePlan {
     }
 
 
+    // Android's bundled ip can ignore a trailing "default" route selector. Inspect the
+    // destination explicitly until supported Android ip implementations honor that filter.
+    fun mainDefaultRouteCount(ipv6: Boolean): String =
+        "ip ${if (ipv6) "-6 " else ""}route show table main | " +
+            "awk '${'$'}1 == \"default\" || ${'$'}1 == \"0.0.0.0/0\" || ${'$'}1 == \"::/0\" {n++} END {print n+0}'"
+
     /**
      * Linux tailscaled expects a main-table default route; Android instead uses netd tables.
      * Its outer sockets then hit its own unreachable rule before Android can select Wi-Fi/cell.

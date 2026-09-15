@@ -94,10 +94,10 @@ object RootProxyManager {
             pid=${'$'}(pidof tailscaled | awk '{print ${'$'}1}')
             [ -n "${'$'}pid" ] || exit 0
             stat -c %u /proc/${'$'}pid
-            ip route show table main default | wc -l
+            ${RootRulePlan.mainDefaultRouteCount(false)}
             ip rule show
             echo IPV6
-            ip -6 route show table main default | wc -l
+            ${RootRulePlan.mainDefaultRouteCount(true)}
             ip -6 rule show
         """.trimIndent())
         if (!result.success || result.output.isBlank()) return emptyList()

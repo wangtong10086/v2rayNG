@@ -55,6 +55,23 @@ class RootRulePlanTest {
         } finally { lock.delete() }
     }
 
+    @Test fun `connected routes do not count as a main table default on Android ip`() {
+        for (ipv6 in listOf(false, true)) {
+            for ((routes, count) in listOf(
+                "192.168.1.0/24 dev wlan0\n198.18.0.0/15 dev tun0" to "0",
+                "fe80::/64 dev wlan0" to "0",
+                "default via 192.168.1.1 dev wlan0" to "1",
+                "0.0.0.0/0 via 192.168.1.1 dev wlan0" to "1",
+                "::/0 via fe80::1 dev wlan0" to "1",
+            )) {
+                val result = RootProcessRunner.run(listOf("sh", "-c",
+                    "ip() { printf '%s\\n' '$routes'; }; " + RootRulePlan.mainDefaultRouteCount(ipv6)), 1000)
+                assertEquals(0, result.code)
+                assertEquals(count, result.output.trim())
+            }
+        }
+    }
+
     @Test fun `tailnet outer sockets resume Android routing with discovered priorities`() {
         val rules = """
             5210: from all fwmark 0x80000/0xff0000 lookup main
