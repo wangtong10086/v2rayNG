@@ -55,4 +55,24 @@ class RootRulePlanTest {
         } finally { lock.delete() }
     }
 
+    @Test fun `tailnet outer sockets resume Android routing with discovered priorities`() {
+        val rules = """
+            5210: from all fwmark 0x80000/0xff0000 lookup main
+            5230: from all fwmark 0x80000/0xff0000 lookup default
+            5250: from all fwmark 0x80000/0xff0000 unreachable
+            5270: from all lookup 52
+            10000: from all fwmark 0xc0000/0xd0000 lookup legacy_system
+        """.trimIndent()
+        assertEquals("fwmark 0x80000/0xff0000 iif lo uidrange 0-0 goto 10000 pref 5249",
+            RootRulePlan.tailnetBypass(rules, 0, false))
+        assertNull(RootRulePlan.tailnetBypass(rules, 0, true))
+        assertNull(RootRulePlan.tailnetBypass(rules, 10001, false))
+        assertNull(RootRulePlan.tailnetBypass(rules.replace("0x80000", "0x90000"), 0, false))
+        assertNull(RootRulePlan.tailnetBypass(rules + "\n5249: from all lookup protected", 0, false))
+        val changed = rules.replace("52", "62").replace("10000", "11000")
+        assertEquals("fwmark 0x80000/0xff0000 iif lo uidrange 1000-1000 goto 11000 pref 6249",
+            RootRulePlan.tailnetBypass(changed, 1000, false))
+        assertNull(RootRulePlan.tailnetBypass(rules.replace("legacy_system", "unrelated_vpn"), 0, false))
+    }
+
 }

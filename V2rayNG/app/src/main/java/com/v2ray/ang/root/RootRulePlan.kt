@@ -47,6 +47,34 @@ internal object RootRulePlan {
     }
 
 
+    /**
+     * Linux tailscaled expects a main-table default route; Android instead uses netd tables.
+     * Its outer sockets then hit its own unreachable rule before Android can select Wi-Fi/cell.
+     * Match only the documented LinuxBypassMark sequence and a system-owned daemon. The
+     * UID, priorities and Android continuation are discovered, not tied to a phone/network.
+     * Remove when that daemon uses Android-aware socket routing (tailscale/tsconst/linuxfw.go).
+     */
+    fun tailnetBypass(rules: String, daemonUid: Int, mainHasDefault: Boolean): String? {
+        if (mainHasDefault || daemonUid !in 0 until Process.FIRST_APPLICATION_UID) return null
+        val entries = rules.lineSequence().mapNotNull { line ->
+            val parts = line.trim().split(Regex(":\\s+"), limit = 2)
+            val priority = parts.firstOrNull()?.toIntOrNull() ?: return@mapNotNull null
+            parts.getOrNull(1)?.replace(Regex("\\s+"), " ")?.let { priority to it }
+        }.toList()
+        // Protocol constants from tailscale/tsconst/linuxfw.go, not a configurable app mark.
+        val mark = "0x80000/0xff0000"
+        val start = entries.indexOfFirst { it.second == "from all fwmark $mark lookup main" }
+        if (start < 0 || entries.size <= start + 4) return null
+        if (entries[start + 1].second != "from all fwmark $mark lookup default" ||
+            entries[start + 2].second != "from all fwmark $mark unreachable" ||
+            !entries[start + 3].second.matches(Regex("from all lookup \\S+")) ||
+            !entries[start + 4].second.endsWith("lookup legacy_system")) return null
+        val priority = entries[start + 2].first - 1
+        if (entries.any { it.first == priority }) return null
+        val target = entries[start + 4].first
+        return "fwmark $mark iif lo uidrange $daemonUid-$daemonUid goto $target pref $priority"
+    }
+
     fun capture(
         ipv6: Boolean, rejectV6: Boolean, chain: String, appUid: Int,
         perApp: Boolean, bypass: Boolean, selected: List<String>,

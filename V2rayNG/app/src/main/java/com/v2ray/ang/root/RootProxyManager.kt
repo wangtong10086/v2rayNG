@@ -89,6 +89,29 @@ object RootProxyManager {
         return result.success
     }
 
+    private fun tailnetBridges(context: Context): List<Pair<String, String>> {
+        val result = RootShell.runScript(context, "inspect_tailnet.sh", """
+            pid=${'$'}(pidof tailscaled | awk '{print ${'$'}1}')
+            [ -n "${'$'}pid" ] || exit 0
+            stat -c %u /proc/${'$'}pid
+            ip route show table main default | wc -l
+            ip rule show
+            echo IPV6
+            ip -6 route show table main default | wc -l
+            ip -6 rule show
+        """.trimIndent())
+        if (!result.success || result.output.isBlank()) return emptyList()
+        val lines = result.output.lines()
+        val uid = lines.firstOrNull()?.trim()?.toIntOrNull() ?: return emptyList()
+        val split = lines.indexOf("IPV6")
+        if (split < 2) return emptyList()
+        return listOf("" to lines.subList(1, split), "-6" to lines.drop(split + 1)).mapNotNull { (family, data) ->
+            val defaultCount = data.firstOrNull()?.trim()?.toIntOrNull() ?: return@mapNotNull null
+            RootRulePlan.tailnetBypass(data.drop(1).joinToString("\n"), uid, defaultCount > 0)
+                ?.let { family to it }
+        }
+    }
+
     // --------------------------------------------------------------- TUN2SOCKS
 
     /**
@@ -142,6 +165,7 @@ object RootProxyManager {
         val connectivity = context.getSystemService(ConnectivityManager::class.java)
         val netId = connectivity.activeNetwork?.toString()?.toIntOrNull() ?: 0
         val owned = File(runDir, "owned").absolutePath
+        val bridges = if (captureDeviceTraffic) tailnetBridges(context) else emptyList()
 
         return buildString {
             append(RootRulePlan.operationPreamble())
@@ -149,6 +173,11 @@ object RootProxyManager {
             appendLine("echo 1 > '$owned'")
             appendLine("cat /proc/sys/net/ipv4/conf/all/rp_filter > '${runDir.absolutePath}/rp_filter.before'")
             appendLine("cat /proc/sys/net/ipv4/ip_forward > '${runDir.absolutePath}/ip_forward.before'")
+            bridges.forEach { (family, rule) ->
+                val journal = File(runDir, "tailnet-bridge${if (family.isEmpty()) 4 else 6}.rule")
+                appendLine("echo '$rule' > '${journal.absolutePath}'")
+                appendLine("ip $family rule add $rule")
+            }
             appendLine("BIN='${bin.absolutePath}'")
             // tun device node
             appendLine("if [ ! -e /dev/net/tun ]; then mkdir -p /dev/net; mknod /dev/net/tun c 10 200; chmod 666 /dev/net/tun; fi")
@@ -379,6 +408,10 @@ object RootProxyManager {
             )
             chains.forEach { appendLine("remove_chain $it || cleanup_failed=1") }
             appendLine("[ \"\$cleanup_failed\" = 0 ] || { echo 'root firewall cleanup failed'; exit 1; }")
+            for (family in listOf("", "-6")) {
+                val journal = File(runDir, "tailnet-bridge${if (family.isEmpty()) 4 else 6}.rule")
+                appendLine("if [ -f '${journal.absolutePath}' ]; then ip $family rule del ${'$'}(cat '${journal.absolutePath}') 2>/dev/null || true; rm -f '${journal.absolutePath}'; fi")
+            }
             // routing rule + table
             appendLine("ip rule del fwmark $MARK table $TABLE priority $PRIORITY 2>/dev/null || true")
             appendLine("ip -6 rule del fwmark $MARK table $TABLE priority $PRIORITY 2>/dev/null || true")
