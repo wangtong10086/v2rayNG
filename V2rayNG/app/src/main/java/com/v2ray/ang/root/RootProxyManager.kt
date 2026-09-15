@@ -1,7 +1,7 @@
 package com.v2ray.ang.root
 
 import android.content.Context
-import android.os.Process
+import android.net.ConnectivityManager
 import android.util.AtomicFile
 import com.v2ray.ang.AppConfig
 import com.v2ray.ang.handler.MmkvManager
@@ -33,23 +33,13 @@ object RootProxyManager {
     private const val TUN = AppConfig.ROOT_TUN_NAME
     private const val TABLE = AppConfig.ROOT_ROUTE_TABLE
     private const val PRIORITY = AppConfig.ROOT_RULE_PRIORITY
-    private const val FWMARK = AppConfig.ROOT_FWMARK
-    private const val MARK = AppConfig.ROOT_MARK_ROUTE
+    private val MARK = RootRulePlan.MARK
 
-    // Local / private / multicast destinations that must never be proxied.
-    private val bypassCidrs = listOf(
-        "0.0.0.0/8", "10.0.0.0/8", "127.0.0.0/8", "169.254.0.0/16",
-        "172.16.0.0/12", "192.168.0.0/16", "224.0.0.0/4", "240.0.0.0/4"
-    )
-
-    // IPv6 equivalents (loopback, link-local, ULA/private, multicast). Feeding the v4 list
-    // above to ip6tables silently fails, so the v6 chain needs its own.
-    private val bypassCidrsV6 = listOf(
-        "::1/128", "fe80::/10", "fc00::/7", "ff00::/8"
-    )
+    private val bypassCidrs = RootRulePlan.bypassCidrsV4
+    private val bypassCidrsV6 = RootRulePlan.bypassCidrsV6
 
     fun start(context: Context): Boolean {
-        teardown(context)
+        if (!teardown(context)) return false
         val script = buildTun2socksSetup(context) ?: return false
         val result = RootShell.runScript(context, "setup_rules.sh", script)
         if (!result.success) {
@@ -67,7 +57,7 @@ object RootProxyManager {
      * (that keeps flowing through the VpnService). Requires root.
      */
     fun startClientSharing(context: Context): Boolean {
-        teardown(context)
+        if (!teardown(context)) return false
         val script = buildTun2socksSetup(context, captureDeviceTraffic = false, forceLanShare = true)
             ?: return false
         val result = RootShell.runScript(context, "setup_rules.sh", script)
@@ -81,13 +71,22 @@ object RootProxyManager {
     }
 
     /** Remove all rules and stop helper processes. Safe to call repeatedly. */
-    fun stop(context: Context) {
-        teardown(context)
-        LogUtil.i(AppConfig.TAG, "RootProxyManager: rules removed")
+    fun stop(context: Context): Boolean = teardown(context)
+
+    fun prepare(context: Context) {
+        val directory = File(context.filesDir, AppConfig.ROOT_RUNTIME_DIR).apply { mkdirs() }
+        File(directory, "teardown_rules.sh").writeText(buildTeardown(context))
     }
 
-    private fun teardown(context: Context) {
-        RootShell.runScript(context, "teardown_rules.sh", buildTeardown(context))
+    fun refreshDns(context: Context, netId: Int): Boolean = RootShell.runScript(
+        context, "refresh_dns.sh", RootRulePlan.operationPreamble() + RootRulePlan.dns(
+            context.applicationInfo.uid, SettingsManager.getLocalDnsPort(), netId, appendHook = false),
+    ).success
+
+    private fun teardown(context: Context): Boolean {
+        val result = RootShell.runScript(context, "teardown_rules.sh", buildTeardown(context))
+        if (!result.success) LogUtil.e(AppConfig.TAG, "RootProxyManager: root cleanup failed: ${result.output}")
+        return result.success
     }
 
     // --------------------------------------------------------------- TUN2SOCKS
@@ -121,10 +120,8 @@ object RootProxyManager {
         val pidFile = File(runDir, "tun2socks.pid").absolutePath
         val logFile = File(runDir, "tun2socks.log").absolutePath
         val cfgFile = File(runDir, "tun2socks.yml")
-        val oomGuardPid = File(runDir, "oomguard.pid").absolutePath
         val ipv6 = MmkvManager.decodeSettingsBool(AppConfig.PREF_IPV6_ENABLED)
         val lanShare = forceLanShare || MmkvManager.decodeSettingsBool(AppConfig.PREF_ROOT_LAN_SHARING)
-        val corePid = Process.myPid()
 
         val config = buildHevConfig(socksUsername, socksPassword, port, ipv6)
         if (!writeHevConfig(cfgFile, config)) {
@@ -142,21 +139,24 @@ object RootProxyManager {
             emptyList()
         }
 
+        val connectivity = context.getSystemService(ConnectivityManager::class.java)
+        val netId = connectivity.activeNetwork?.toString()?.toIntOrNull() ?: 0
+        val owned = File(runDir, "owned").absolutePath
+
         return buildString {
-            appendLine("set -e")
+            append(RootRulePlan.operationPreamble())
+            append(RootRulePlan.preflight())
+            appendLine("echo 1 > '$owned'")
+            appendLine("cat /proc/sys/net/ipv4/conf/all/rp_filter > '${runDir.absolutePath}/rp_filter.before'")
+            appendLine("cat /proc/sys/net/ipv4/ip_forward > '${runDir.absolutePath}/ip_forward.before'")
             appendLine("BIN='${bin.absolutePath}'")
-            // Protect the core (this app process) from the Android low-memory killer.
-            // system_server keeps recomputing oom_score_adj for app processes, so a single
-            // write would be reverted — re-pin it from a small root loop instead.
-            appendLine("nohup sh -c 'while true; do echo ${AppConfig.ROOT_OOM_SCORE} > /proc/$corePid/oom_score_adj 2>/dev/null; sleep 5; done' >/dev/null 2>&1 &")
-            appendLine("echo \$! > '$oomGuardPid'")
             // tun device node
             appendLine("if [ ! -e /dev/net/tun ]; then mkdir -p /dev/net; mknod /dev/net/tun c 10 200; chmod 666 /dev/net/tun; fi")
             // The HEV config is written separately by the app process. Never place credentials
             // in this root shell script, even when YAML quoting would otherwise be valid.
-            appendLine("nohup \"\$BIN\" '$cfgPath' >'$logFile' 2>&1 &")
+            appendLine("nohup \"\$BIN\" '$cfgPath' >'$logFile' 2>&1 9>&- &")
             appendLine("T2S_PID=\$!")
-            appendLine("echo \$T2S_PID > '$pidFile'")
+            appendLine("echo \$T2S_PID \$(awk '{print \$22}' /proc/\$T2S_PID/stat) > '$pidFile'")
             appendLine("echo ${AppConfig.ROOT_OOM_SCORE} > /proc/\$T2S_PID/oom_score_adj 2>/dev/null || true")
             // wait for the interface hev creates to appear
             appendLine("i=0; while [ \$i -lt 20 ]; do ip link show $TUN >/dev/null 2>&1 && break; sleep 0.3; i=\$((i+1)); done")
@@ -171,25 +171,27 @@ object RootProxyManager {
             appendLine("ip rule add fwmark $MARK table $TABLE priority $PRIORITY")
             // mark the device's own packets into the tun (Root mode only)
             if (captureDeviceTraffic) {
-                append(buildMangleMarking("iptables", appUid, perAppEnabled, bypassApps, selectedUids))
+                append(RootRulePlan.dns(appUid, SettingsManager.getLocalDnsPort(), netId, appendHook = true))
+                append(RootRulePlan.capture(false, false, CHAIN, appUid,
+                    perAppEnabled, bypassApps, selectedUids))
             }
             // optionally route hotspot / USB-tethered clients through the tun too
             if (lanShare) {
+                appendLine("echo 1 > '${runDir.absolutePath}/lan-owned'")
                 append(buildLanShareSetup(captureDeviceTraffic, ipv6))
             }
             if (captureDeviceTraffic) {
-                // IPv6 is best-effort: never fail the (working) IPv4 setup over it.
-                appendLine("set +e")
+                // A failed IPv6 capture/reject rule must roll back instead of reporting success.
                 if (ipv6) {
                     // route the device's v6 into the tun, same as v4
                     appendLine("ip -6 addr add ${AppConfig.ROOT_TUN_ADDR_V6} dev $TUN 2>/dev/null || true")
                     appendLine("ip -6 route replace default dev $TUN table $TABLE 2>/dev/null || true")
                     appendLine("ip -6 rule add fwmark $MARK table $TABLE priority $PRIORITY 2>/dev/null || true")
-                    append(buildMangleMarking("ip6tables", appUid, perAppEnabled, bypassApps, selectedUids))
+                    append(RootRulePlan.capture(true, false, CHAIN, appUid, perAppEnabled, bypassApps, selectedUids))
                 } else {
                     // v6 disabled: blackhole native v6 egress for the captured apps so they
                     // fall back to v4-through-proxy, matching what a v4-only VpnService does.
-                    append(buildV6Blackhole(appUid, perAppEnabled, bypassApps, selectedUids))
+                    append(RootRulePlan.capture(true, true, AppConfig.ROOT_V6_CHAIN, appUid, perAppEnabled, bypassApps, selectedUids))
                 }
             }
         }
@@ -244,110 +246,6 @@ object RootProxyManager {
         }
     }
 
-    /**
-     * mangle OUTPUT marking chain (ipv4/ipv6). Mirrors VpnService's capture behavior:
-     * - all-apps (no per-app): mark EVERY remaining uid (incl uid 0 + all system uids), so
-     *   nothing is missed;
-     * - bypass mode: the selected apps go fully direct, everything else is captured;
-     * - proxy mode: only the selected apps are captured.
-     */
-    private fun buildMangleMarking(
-        cmd: String,
-        appUid: Int,
-        perAppEnabled: Boolean,
-        bypassApps: Boolean,
-        selectedUids: List<String>,
-    ): String {
-        val allowMode = perAppEnabled && !bypassApps
-        val bypassSelected = perAppEnabled && bypassApps && selectedUids.isNotEmpty()
-        return buildString {
-            appendLine("$cmd -t mangle -N $CHAIN 2>/dev/null || true")
-            appendLine("$cmd -t mangle -F $CHAIN")
-            // the app's own core traffic (the real outbound) must not loop back into the tun.
-            // The $FWMARK RETURN is kept defensively (hev itself only talks to loopback, which
-            // the 127.0.0.0/8 bypass below already RETURNs).
-            appendLine("$cmd -t mangle -A $CHAIN -m mark --mark $FWMARK -j RETURN")
-            appendLine("$cmd -t mangle -A $CHAIN -m owner --uid-owner $appUid -j RETURN")
-            // bypass mode: selected apps go fully direct (incl their DNS)
-            if (bypassSelected) {
-                selectedUids.forEach { appendLine("$cmd -t mangle -A $CHAIN -m owner --uid-owner $it -j RETURN") }
-            }
-            // Route DNS through the core for ALL modes, with no uid filter. On Android the
-            // DNS query is sent by netd (a shared system uid) on behalf of the app, not under
-            // the app's own uid, so it can't be attributed to a selected uid via owner-match.
-            // This MUST also run before the LAN-bypass RETURNs below, otherwise a query to a
-            // LAN/router resolver (192.168.x / 10.x) would be returned direct and resolved by
-            // the local ISP resolver (DNS leak + CDN mis-resolution, e.g. Instagram media).
-            // The MARK survives a later RETURN, so the marked query still routes into the tun.
-            appendLine("$cmd -t mangle -A $CHAIN -p udp --dport 53 -j MARK --set-xmark $MARK")
-            appendLine("$cmd -t mangle -A $CHAIN -p tcp --dport 53 -j MARK --set-xmark $MARK")
-            // keep LAN / private destinations direct (per-family CIDR list)
-            val cidrs = if (cmd == "ip6tables") bypassCidrsV6 else bypassCidrs
-            cidrs.forEach { appendLine("$cmd -t mangle -A $CHAIN -d $it -j RETURN") }
-            if (allowMode) {
-                // Proxy ONLY the explicitly selected apps. If nothing resolved (e.g. the
-                // selected packages failed to resolve to uids at early boot), mark nothing
-                // instead of falling through to the catch-all below: a fail-open here would
-                // tunnel every unselected app — both a privacy leak and the "per-app proxies
-                // everything after a reboot" bug.
-                selectedUids.forEach { appendLine("$cmd -t mangle -A $CHAIN -m owner --uid-owner $it -j MARK --set-xmark $MARK") }
-            } else {
-                // all-apps mode (per-app off) or bypass mode: capture EVERY remaining uid
-                // (incl uid 0 + system uids)
-                appendLine("$cmd -t mangle -A $CHAIN -j MARK --set-xmark $MARK")
-            }
-            appendLine("$cmd -t mangle -D OUTPUT -j $CHAIN 2>/dev/null || true")
-            appendLine("$cmd -t mangle -A OUTPUT -j $CHAIN")
-        }
-    }
-
-    /**
-     * Blackhole native IPv6 egress for the captured app population when IPv6 is NOT routed
-     * into the tun. A v4-only VpnService has no v6 route, so the kernel rejects apps' v6 and
-     * they fall back to IPv4; Root mode has to reproduce that explicitly, otherwise v6-capable
-     * apps reach destinations natively, bypassing the proxy / leaking. REJECT (not DROP) gives
-     * an instant failure so happy-eyeballs falls back to v4 without a timeout.
-     *
-     * Exemptions mirror the v4 chain: the tun2socks helper (fwmark), the app's own core (uid),
-     * loopback, link-local / multicast (NDP/RA/MLD) and ULA/LAN destinations. Per-app selection
-     * is honored: in bypass mode the bypassed apps keep native v6; in proxy mode only the
-     * selected apps lose v6 (everything else stays fully direct).
-     */
-    private fun buildV6Blackhole(
-        appUid: Int,
-        perAppEnabled: Boolean,
-        bypassApps: Boolean,
-        selectedUids: List<String>,
-    ): String {
-        val chain = AppConfig.ROOT_V6_CHAIN
-        val allowMode = perAppEnabled && !bypassApps
-        val bypassSelected = perAppEnabled && bypassApps && selectedUids.isNotEmpty()
-        val reject = "-j REJECT --reject-with icmp6-adm-prohibited"
-        return buildString {
-            appendLine("ip6tables -t filter -N $chain 2>/dev/null || true")
-            appendLine("ip6tables -t filter -F $chain")
-            // never touch the helper, the core, loopback, NDP/link-local/multicast or LAN
-            appendLine("ip6tables -t filter -A $chain -m mark --mark $FWMARK -j RETURN")
-            appendLine("ip6tables -t filter -A $chain -m owner --uid-owner $appUid -j RETURN")
-            appendLine("ip6tables -t filter -A $chain -o lo -j RETURN")
-            bypassCidrsV6.forEach { appendLine("ip6tables -t filter -A $chain -d $it -j RETURN") }
-            // bypass mode: bypassed apps keep their native v6
-            if (bypassSelected) {
-                selectedUids.forEach { appendLine("ip6tables -t filter -A $chain -m owner --uid-owner $it -j RETURN") }
-            }
-            if (allowMode) {
-                // proxy mode: only the selected apps lose v6 (so they fall back to v4-via-proxy).
-                // None resolved -> reject nothing, mirroring the v4 chain's fail-closed handling.
-                selectedUids.forEach { appendLine("ip6tables -t filter -A $chain -m owner --uid-owner $it $reject") }
-            } else {
-                // all-apps / bypass: reject everyone left
-                appendLine("ip6tables -t filter -A $chain $reject")
-            }
-            appendLine("ip6tables -t filter -D OUTPUT -j $chain 2>/dev/null || true")
-            appendLine("ip6tables -t filter -A OUTPUT -j $chain")
-        }
-    }
-
     // -------------------------------------------------- LAN / tethering sharing
 
     /**
@@ -369,7 +267,7 @@ object RootProxyManager {
             ?: AppConfig.ROOT_LAN_DNS
         val lanCidrs = listOf("10.0.0.0/8", "172.16.0.0/12", "192.168.0.0/16")
         return buildString {
-            appendLine("set +e")
+            appendLine("set -e")
             appendLine("echo 1 > /proc/sys/net/ipv4/ip_forward 2>/dev/null || true")
             // forward traffic to/from the tun
             appendLine("iptables -N $fwd 2>/dev/null || true")
@@ -391,16 +289,16 @@ object RootProxyManager {
             appendLine("iptables -t nat -D PREROUTING -j $dnsChain 2>/dev/null || true")
             appendLine("iptables -t nat -A PREROUTING -j $dnsChain")
             // policy routing: return-path via main, LAN direct, the rest via the tun table
-            appendLine("ip rule add iif lo goto 6000 pref 5000 2>/dev/null || true")
-            appendLine("ip rule add iif $TUN lookup main suppress_prefixlength 0 pref 5010 2>/dev/null || true")
-            appendLine("ip rule add iif $TUN goto 6000 pref 5020 2>/dev/null || true")
-            appendLine("ip rule add to 10.0.0.0/8 lookup main pref 5025 2>/dev/null || true")
-            appendLine("ip rule add to 172.16.0.0/12 lookup main pref 5026 2>/dev/null || true")
-            appendLine("ip rule add to 192.168.0.0/16 lookup main pref 5027 2>/dev/null || true")
-            appendLine("ip rule add from 10.0.0.0/8 lookup $TABLE pref 5030 2>/dev/null || true")
-            appendLine("ip rule add from 172.16.0.0/12 lookup $TABLE pref 5040 2>/dev/null || true")
-            appendLine("ip rule add from 192.168.0.0/16 lookup $TABLE pref 5050 2>/dev/null || true")
-            appendLine("ip rule add nop pref 6000 2>/dev/null || true")
+            appendLine("ip rule add iif lo goto 7100 pref 6100 2>/dev/null || true")
+            appendLine("ip rule add iif $TUN lookup main suppress_prefixlength 0 pref 6110 2>/dev/null || true")
+            appendLine("ip rule add iif $TUN goto 7100 pref 6120 2>/dev/null || true")
+            appendLine("ip rule add to 10.0.0.0/8 lookup main pref 6125 2>/dev/null || true")
+            appendLine("ip rule add to 172.16.0.0/12 lookup main pref 6126 2>/dev/null || true")
+            appendLine("ip rule add to 192.168.0.0/16 lookup main pref 6127 2>/dev/null || true")
+            appendLine("ip rule add from 10.0.0.0/8 lookup $TABLE pref 6130 2>/dev/null || true")
+            appendLine("ip rule add from 172.16.0.0/12 lookup $TABLE pref 6140 2>/dev/null || true")
+            appendLine("ip rule add from 192.168.0.0/16 lookup $TABLE pref 6150 2>/dev/null || true")
+            appendLine("ip rule add nop pref 7100 2>/dev/null || true")
 
             // ---------------------------------------------------------- IPv6 clients
             // Tethered/hotspot clients get a native (RA-assigned) global IPv6. The IPv4 rules
@@ -451,50 +349,66 @@ object RootProxyManager {
     private fun buildTeardown(context: Context): String {
         val runDir = File(context.filesDir, AppConfig.ROOT_RUNTIME_DIR)
         val pidFile = File(runDir, "tun2socks.pid").absolutePath
-        val oomGuardPid = File(runDir, "oomguard.pid").absolutePath
-        val corePid = Process.myPid()
         return buildString {
-            // mangle (TUN2SOCKS), both families
-            for (cmd in listOf("iptables", "ip6tables")) {
-                appendLine("$cmd -t mangle -D OUTPUT -j $CHAIN 2>/dev/null || true")
-                appendLine("$cmd -t mangle -F $CHAIN 2>/dev/null || true")
-                appendLine("$cmd -t mangle -X $CHAIN 2>/dev/null || true")
-            }
-            // IPv6 blackhole chain (only set up when v6 is disabled; harmless if absent)
-            appendLine("ip6tables -t filter -D OUTPUT -j ${AppConfig.ROOT_V6_CHAIN} 2>/dev/null || true")
-            appendLine("ip6tables -t filter -F ${AppConfig.ROOT_V6_CHAIN} 2>/dev/null || true")
-            appendLine("ip6tables -t filter -X ${AppConfig.ROOT_V6_CHAIN} 2>/dev/null || true")
+            appendLine("[ -f '${runDir.absolutePath}/owned' ] || exit 0")
+            append(RootRulePlan.operationPreamble())
+            appendLine("if [ -f '$pidFile' ]; then read helper_pid helper_start < '$pidFile'; else helper_pid=0; helper_start=0; fi")
+            appendLine("actual_start=\$(awk '{print \$22}' /proc/\$helper_pid/stat 2>/dev/null || true)")
+            appendLine("if ip link show $TUN >/dev/null 2>&1 && [ \"\$actual_start\" != \"\$helper_start\" ]; then echo 'refusing to remove a foreign root tunnel'; exit 1; fi")
+            appendLine("cleanup_failed=0")
+            appendLine("remove_chain() {")
+            appendLine("  tool=\$1; table=\$2; hook=\$3; chain=\$4")
+            appendLine("  if \"\$tool\" -t \"\$table\" -S \"\$chain\" >/dev/null 2>&1; then")
+            appendLine("    while true; do")
+            appendLine("      if \"\$tool\" -t \"\$table\" -C \"\$hook\" -j \"\$chain\" >/dev/null 2>&1; then")
+            appendLine("        \"\$tool\" -t \"\$table\" -D \"\$hook\" -j \"\$chain\" || return \$?")
+            appendLine("      else code=\$?; [ \"\$code\" = 1 ] || return \"\$code\"; break; fi")
+            appendLine("    done")
+            appendLine("    \"\$tool\" -t \"\$table\" -F \"\$chain\" && \"\$tool\" -t \"\$table\" -X \"\$chain\"")
+            appendLine("  else code=\$?; [ \"\$code\" = 1 ]; fi")
+            appendLine("}")
+            val chains = listOf(
+                "iptables nat OUTPUT ${RootRulePlan.DNS_CHAIN}",
+                "iptables mangle OUTPUT $CHAIN",
+                "ip6tables mangle OUTPUT $CHAIN",
+                "ip6tables filter OUTPUT ${AppConfig.ROOT_V6_CHAIN}",
+                "iptables filter FORWARD ${AppConfig.ROOT_FWD_CHAIN}",
+                "iptables nat PREROUTING ${AppConfig.ROOT_DNS_CHAIN}",
+                "ip6tables filter FORWARD ${AppConfig.ROOT_V6_FWD_CHAIN}",
+                "ip6tables mangle PREROUTING ${AppConfig.ROOT_V6_PRE_CHAIN}",
+            )
+            chains.forEach { appendLine("remove_chain $it || cleanup_failed=1") }
+            appendLine("[ \"\$cleanup_failed\" = 0 ] || { echo 'root firewall cleanup failed'; exit 1; }")
             // routing rule + table
             appendLine("ip rule del fwmark $MARK table $TABLE priority $PRIORITY 2>/dev/null || true")
             appendLine("ip -6 rule del fwmark $MARK table $TABLE priority $PRIORITY 2>/dev/null || true")
             appendLine("ip route flush table $TABLE 2>/dev/null || true")
             appendLine("ip -6 route flush table $TABLE 2>/dev/null || true")
-            // LAN / tethering sharing (always cleaned, harmless if it was never set up)
-            appendLine("iptables -D FORWARD -j ${AppConfig.ROOT_FWD_CHAIN} 2>/dev/null || true")
-            appendLine("iptables -F ${AppConfig.ROOT_FWD_CHAIN} 2>/dev/null || true")
-            appendLine("iptables -X ${AppConfig.ROOT_FWD_CHAIN} 2>/dev/null || true")
+            appendLine("if [ -f '${runDir.absolutePath}/lan-owned' ]; then")
             appendLine("iptables -t mangle -D FORWARD -o $TUN -p tcp --tcp-flags SYN,RST SYN -j TCPMSS --set-mss 1350 2>/dev/null || true")
-            appendLine("iptables -t nat -D PREROUTING -j ${AppConfig.ROOT_DNS_CHAIN} 2>/dev/null || true")
-            appendLine("iptables -t nat -F ${AppConfig.ROOT_DNS_CHAIN} 2>/dev/null || true")
-            appendLine("iptables -t nat -X ${AppConfig.ROOT_DNS_CHAIN} 2>/dev/null || true")
-            // IPv6 LAN-sharing chains (forward accept/reject + forwarded-client marking)
-            appendLine("ip6tables -D FORWARD -j ${AppConfig.ROOT_V6_FWD_CHAIN} 2>/dev/null || true")
-            appendLine("ip6tables -F ${AppConfig.ROOT_V6_FWD_CHAIN} 2>/dev/null || true")
-            appendLine("ip6tables -X ${AppConfig.ROOT_V6_FWD_CHAIN} 2>/dev/null || true")
-            appendLine("ip6tables -t mangle -D PREROUTING -j ${AppConfig.ROOT_V6_PRE_CHAIN} 2>/dev/null || true")
-            appendLine("ip6tables -t mangle -F ${AppConfig.ROOT_V6_PRE_CHAIN} 2>/dev/null || true")
-            appendLine("ip6tables -t mangle -X ${AppConfig.ROOT_V6_PRE_CHAIN} 2>/dev/null || true")
-            for (pref in listOf(5000, 5010, 5020, 5025, 5026, 5027, 5030, 5040, 5050, 6000)) {
-                appendLine("ip rule del pref $pref 2>/dev/null || true")
+            run {
+                val policies = listOf(
+                    "iif lo goto 7100 pref 6100",
+                    "iif $TUN lookup main suppress_prefixlength 0 pref 6110",
+                    "iif $TUN goto 7100 pref 6120",
+                    "to 10.0.0.0/8 lookup main pref 6125",
+                    "to 172.16.0.0/12 lookup main pref 6126",
+                    "to 192.168.0.0/16 lookup main pref 6127",
+                    "from 10.0.0.0/8 lookup $TABLE pref 6130",
+                    "from 172.16.0.0/12 lookup $TABLE pref 6140",
+                    "from 192.168.0.0/16 lookup $TABLE pref 6150",
+                    "nop pref 7100",
+                )
+                policies.forEach { appendLine("ip rule del $it 2>/dev/null || true") }
             }
+            appendLine("fi")
             // tun device down + helper process
             appendLine("ip link set dev $TUN down 2>/dev/null || true")
-            appendLine("[ -f '$pidFile' ] && kill \$(cat '$pidFile') 2>/dev/null || true")
+            appendLine("[ \"\$actual_start\" = \"\$helper_start\" ] && [ \"\$helper_pid\" -gt 1 ] && kill \$helper_pid 2>/dev/null || true")
             appendLine("rm -f '$pidFile'")
-            // stop the OOM re-pin loop and restore the core process's LMK priority
-            appendLine("[ -f '$oomGuardPid' ] && kill \$(cat '$oomGuardPid') 2>/dev/null || true")
-            appendLine("rm -f '$oomGuardPid'")
-            appendLine("echo 0 > /proc/$corePid/oom_score_adj 2>/dev/null || true")
+            appendLine("if [ -f '${runDir.absolutePath}/rp_filter.before' ] && [ \"\$(cat /proc/sys/net/ipv4/conf/all/rp_filter)\" = 0 ]; then cat '${runDir.absolutePath}/rp_filter.before' > /proc/sys/net/ipv4/conf/all/rp_filter; fi")
+            appendLine("if [ -f '${runDir.absolutePath}/ip_forward.before' ] && [ \"\$(cat /proc/sys/net/ipv4/ip_forward)\" = 1 ]; then cat '${runDir.absolutePath}/ip_forward.before' > /proc/sys/net/ipv4/ip_forward; fi")
+            appendLine("rm -f '${runDir.absolutePath}/owned' '${runDir.absolutePath}/lan-owned'")
         }
     }
 }

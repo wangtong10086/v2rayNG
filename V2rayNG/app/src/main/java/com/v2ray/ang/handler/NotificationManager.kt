@@ -120,7 +120,22 @@ object NotificationManager {
      * return early. A duplicate startForegroundService call still requires the service
      * to enter foreground state promptly, even when the core is already running.
      */
-    fun ensureForeground() {
+    fun ensureForeground(owner: Service? = null) {
+        // Root initializes the core on its IO worker, after entering foreground here.
+        if (owner != null) {
+            val channelId = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                val manager = owner.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+                manager.createNotificationChannel(NotificationChannel(
+                    AppConfig.RAY_NG_CHANNEL_ID, AppConfig.RAY_NG_CHANNEL_NAME, NotificationManager.IMPORTANCE_LOW,
+                ))
+                AppConfig.RAY_NG_CHANNEL_ID
+            } else ""
+            val notification = mBuilder?.build() ?: NotificationCompat.Builder(owner, channelId)
+                .setSmallIcon(R.drawable.ic_stat_name).setContentTitle(owner.getString(R.string.app_name))
+                .setOngoing(true).setOnlyAlertOnce(true).build()
+            owner.startForeground(NOTIFICATION_ID, notification)
+            return
+        }
         val service = getService() ?: return
         val notification = mBuilder?.build()
         if (notification == null) showNotification(null) else service.startForeground(NOTIFICATION_ID, notification)

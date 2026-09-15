@@ -35,4 +35,10 @@ interface ServiceControl {
      * @return True if the networks were accepted.
      */
     fun setUnderlyingNetworks(networks: Array<Network>?): Boolean = false
+
+    /** Return true when the mode owns physical-network DNS/reload ordering. */
+    fun onNetworkChanged(reload: Boolean): Boolean = false
+
+    /** Return true when this mode restarts only after its owned resources have been released. */
+    fun restartService(): Boolean = false
 }

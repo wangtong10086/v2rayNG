@@ -114,6 +114,7 @@ object AppConfig {
     const val TAG_BLOCKED = "block"
     const val TAG_FRAGMENT = "fragment"
     const val TAG_DNS = "dns-module"
+    const val TAG_ROOT_DNS_IN = "root-dns-in"
     const val TAG_DOMESTIC_DNS = "domestic-dns"
     const val TAG_BALANCER = "balancer-main"
     const val TAG_BALANCER_PRE = "balancer"
@@ -162,6 +163,7 @@ object AppConfig {
 
     /** Ports and addresses for various services. */
     const val PORT_LOCAL_DNS = "10853"
+    const val PORT_DNS = 53
     const val PORT_SOCKS = "10808"
     const val WIREGUARD_LOCAL_ADDRESS_V4 = "172.16.0.2/32"
     const val WIREGUARD_LOCAL_ADDRESS_V6 = "2606:4700:110:8f81:d551:a0:532e:a2b3/128"
@@ -228,7 +230,10 @@ object AppConfig {
     const val ROOT_RUNTIME_DIR = "sys_cache"
     const val ROOT_IPTABLES_CHAIN = "CORE_FILTER"
     const val ROOT_FWMARK = 255            // defensive RETURN tag; hev's only upstream socket is loopback (already bypassed)
-    const val ROOT_MARK_ROUTE = 1          // packets we want pushed into the tun device
+    // Android's netId, VPN protection and permission bits occupy the lower 21 bits.
+    // Reserve one routing bit and always mask it so those platform bits survive.
+    const val ROOT_MARK_ROUTE = 0x08000000
+    const val ROOT_DNS_OUTPUT_CHAIN = "CORE_DNS_OUT"
     const val ROOT_ROUTE_TABLE = 2024
     const val ROOT_RULE_PRIORITY = 1000
     const val ROOT_TUN_NAME = "utun7788"

@@ -283,10 +283,10 @@ object SettingsManager {
         return MmkvManager.decodeSettingsString(AppConfig.PREF_SOCKS_PASSWORD)?.trim()?.takeIf { it.isNotEmpty() }
     }
 
-    /**
-     * Get the HTTP port.
-     * @return The HTTP port.
-     */
+    /** Shared local DNS listener port, read from the existing persisted setting. */
+    fun getLocalDnsPort(): Int = MmkvManager.decodeSettingsString(AppConfig.PREF_LOCAL_DNS_PORT)
+        ?.toIntOrNull()?.takeIf { it in 1024..65535 } ?: AppConfig.PORT_LOCAL_DNS.toInt()
+
     fun getHttpPort(): Int {
         return getSocksPort() + if (Utils.isXray()) 0 else 1
     }

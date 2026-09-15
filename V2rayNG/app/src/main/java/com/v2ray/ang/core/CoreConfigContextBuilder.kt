@@ -231,8 +231,7 @@ object CoreConfigContextBuilder {
 
         rulesetItems
             .asSequence()
-            .filter { it.enabled }
-            .filter { !it.domain.isNullOrEmpty() }
+            .filter { DnsRoutingPlan.canSelectResolver(it) }
             .forEach { rule ->
                 val normalizedOutboundTag = when (rule.outboundTag) {
                     AppConfig.TAG_DIRECT -> AppConfig.TAG_DIRECT

@@ -517,7 +517,7 @@ object CoreConfigManager {
             inbound1.listen = AppConfig.LOOPBACK
         }
         inbound1.port = socksPort
-        inbound1.settings?.udp = MmkvManager.decodeSettingsBool(AppConfig.PREF_SOCKS_ENABLE_UDP, AppConfig.DEFAULT_SOCKS_ENABLE_UDP)
+        inbound1.settings?.udp = forcedBySocksRoot || MmkvManager.decodeSettingsBool(AppConfig.PREF_SOCKS_ENABLE_UDP, AppConfig.DEFAULT_SOCKS_ENABLE_UDP)
         if (socksUsername != null && socksPassword != null) {
             inbound1.settings?.auth = "password"
             inbound1.settings?.accounts = listOf(
@@ -685,6 +685,13 @@ object CoreConfigManager {
      */
     private fun configureRootModeDns(v2rayConfig: V2rayConfig) {
         if (!SettingsManager.isRootMode()) return
+
+        val port = SettingsManager.getLocalDnsPort()
+        require(port != SettingsManager.getSocksPort()) { "Root DNS and SOCKS ports must differ" }
+        v2rayConfig.inbounds.add(DnsRoutingPlan.rootInbound(port))
+        v2rayConfig.routing.rules.add(0, V2rayConfig.RoutingBean.RulesBean(
+            inboundTag = arrayListOf(AppConfig.TAG_ROOT_DNS_IN), outboundTag = "dns-out",
+        ))
 
         if (v2rayConfig.routing.rules.none { it.outboundTag == "dns-out" && it.port == "53" }) {
             v2rayConfig.routing.rules.add(
@@ -869,27 +876,22 @@ object CoreConfigManager {
         v2rayConfig: V2rayConfig,
         policyGroupBalancerTags: Map<String, String>,
     ) {
-        val servers = ArrayList<Any>()
         val remoteDns = SettingsManager.getRemoteDnsServers()
         val domesticDns = SettingsManager.getDomesticDnsServers()
-
-        remoteDns.forEach { servers.add(it) }
-
-        val hosts = buildDnsHostsFromRoutingRules(configContext)
-        val cnDomesticDnsTags = buildDnsCnModeFromRoutingRules(configContext, servers, domesticDns)
-        val domesticDnsTags = buildDnsFromRoutingRules(
-            configContext = configContext,
-            servers = servers,
-            remoteDns = remoteDns,
-            domesticDns = domesticDns
-        )
-        domesticDnsTags.addAll(cnDomesticDnsTags)
-
+        val localDns = if (SettingsManager.isRootMode()) {
+            val connectivity = configContext.context.getSystemService(android.net.ConnectivityManager::class.java)
+            connectivity.activeNetwork?.let { connectivity.getLinkProperties(it) }?.dnsServers
+                ?.filterIsInstance<java.net.Inet4Address>()?.mapNotNull { it.hostAddress }.orEmpty()
+        } else emptyList()
+        val plan = DnsRoutingPlan.build(configContext.routingDomainRules, domesticDns, remoteDns, localDns)
+        val domesticDnsTags = plan.directTags
         v2rayConfig.dns = V2rayConfig.DnsBean(
-            servers = servers,
-            hosts = hosts,
+            servers = plan.servers,
+            hosts = buildDnsHosts(),
             tag = AppConfig.TAG_DNS,
-            enableParallelQuery = if ((domesticDns.size + remoteDns.size) > 2) true else null
+            queryStrategy = if (SettingsManager.isRootMode() &&
+                !MmkvManager.decodeSettingsBool(AppConfig.PREF_IPV6_ENABLED)) "UseIPv4" else null,
+            enableParallelQuery = false,
         )
 
         if (domesticDnsTags.isNotEmpty()) {
@@ -922,17 +924,11 @@ object CoreConfigManager {
         }
     }
 
-    private fun buildDnsHostsFromRoutingRules(configContext: CoreConfigContext): MutableMap<String, Any> {
+    private fun buildDnsHosts(): MutableMap<String, Any> {
         val hosts = mutableMapOf<String, Any>()
 
-        val blockDomains = configContext.routingDomainRules
-            .asSequence()
-            .filter { it.outboundTag == AppConfig.TAG_BLOCKED }
-            .flatMap { it.domain.asSequence() }
-            .toList()
-        if (blockDomains.isNotEmpty()) {
-            hosts.putAll(blockDomains.map { it to AppConfig.LOOPBACK })
-        }
+        // Traffic rules may depend on port, transport, or process. They are not DNS hosts.
+        // Keep explicit user hosts and resolver bootstrap mappings below.
 
         hosts[AppConfig.GOOGLEAPIS_CN_DOMAIN] = AppConfig.GOOGLEAPIS_COM_DOMAIN
         hosts[AppConfig.DNS_ALIDNS_DOMAIN] = AppConfig.DNS_ALIDNS_ADDRESSES
@@ -965,87 +961,6 @@ object CoreConfigManager {
         }
 
         return hosts
-    }
-
-    private fun buildDnsCnModeFromRoutingRules(configContext: CoreConfigContext, servers: ArrayList<Any>, domesticDns: List<String>): List<String> {
-        val cnRegionFilter = { domain: String ->
-            domain.startsWith("geosite:") && (domain.endsWith("-cn") || domain.endsWith("@cn"))
-                    || domain == AppConfig.GEOSITE_CN
-        }
-        val isCnRoutingMode = configContext.routingDomainRules
-            .asSequence()
-            .filter { it.outboundTag == AppConfig.TAG_DIRECT }
-            .flatMap { it.domain.asSequence() }
-            .any { it == AppConfig.GEOSITE_CN }
-
-        if (!isCnRoutingMode) {
-            return emptyList()
-        }
-
-        val geoipCn = arrayListOf(AppConfig.GEOIP_CN)
-        val cnDomains = configContext.routingDomainRules
-            .asSequence()
-            .filter { it.outboundTag == AppConfig.TAG_DIRECT }
-            .flatMap { it.domain.asSequence() }
-            .filter { cnRegionFilter(it) }
-            .toList()
-        if (cnDomains.isEmpty()) {
-            return emptyList()
-        }
-
-        val cnDomesticDnsTags = mutableListOf<String>()
-        domesticDns.forEachIndexed { index, address ->
-            val cnDomesticDnsTag = "${AppConfig.TAG_DOMESTIC_DNS}_cn_expect_${index}"
-            servers.add(
-                V2rayConfig.DnsBean.ServersBean(
-                    address = address,
-                    domains = cnDomains,
-                    expectIPs = geoipCn,
-                    skipFallback = true,
-                    tag = cnDomesticDnsTag
-                )
-            )
-            cnDomesticDnsTags.add(cnDomesticDnsTag)
-        }
-        return cnDomesticDnsTags
-    }
-
-    private fun buildDnsFromRoutingRules(
-        configContext: CoreConfigContext,
-        servers: ArrayList<Any>,
-        remoteDns: List<String>,
-        domesticDns: List<String>,
-    ): MutableList<String> {
-        val domesticDnsTags = mutableListOf<String>()
-        configContext.routingDomainRules.forEachIndexed { ruleIndex, rule ->
-            when (rule.outboundTag) {
-                AppConfig.TAG_DIRECT -> {
-                    domesticDns.forEachIndexed { dnsIndex, address ->
-                        val tag = "${AppConfig.TAG_DOMESTIC_DNS}_${ruleIndex}_$dnsIndex"
-                        servers.add(
-                            V2rayConfig.DnsBean.ServersBean(
-                                address = address,
-                                domains = rule.domain,
-                                skipFallback = true,
-                                tag = tag
-                            )
-                        )
-                        domesticDnsTags.add(tag)
-                    }
-                }
-
-                AppConfig.TAG_BLOCKED -> Unit
-                else -> {
-                    servers.add(
-                        V2rayConfig.DnsBean.ServersBean(
-                            address = remoteDns.first(),
-                            domains = rule.domain,
-                        )
-                    )
-                }
-            }
-        }
-        return domesticDnsTags
     }
 
     //endregion

@@ -47,7 +47,10 @@ data class V2rayConfig(
             var accounts: List<SocksAccountBean>? = null,
             var name: String? = null,
 
-            var mtu: Int? = null
+            var mtu: Int? = null,
+            var address: String? = null,
+            var port: Int? = null,
+            var network: String? = null,
         ) {
             data class SocksAccountBean(
                 var user: String = "",
@@ -353,6 +356,8 @@ data class V2rayConfig(
             val clientIp: String? = null,
             val skipFallback: Boolean? = null,
             val tag: String? = null,
+            val finalQuery: Boolean? = null,
+            val timeoutMs: Int? = null,
         )
     }
 
