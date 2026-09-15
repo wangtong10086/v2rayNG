@@ -10,11 +10,11 @@ android {
     compileSdk = 37
 
     defaultConfig {
-        applicationId = "com.v2ray.ang"
+        applicationId = providers.gradleProperty("APPLICATION_ID_OVERRIDE").getOrElse("com.v2ray.ang")
         minSdk = 24
         targetSdk = 37
         versionCode = 748
-        versionName = "2.3.8"
+        versionName = "2.3.8" + providers.gradleProperty("VERSION_NAME_SUFFIX").getOrElse("")
 
         val abiFilterList = (properties["ABI_FILTERS"] as? String)?.split(';')
         splits {
