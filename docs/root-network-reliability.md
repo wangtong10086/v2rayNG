@@ -32,7 +32,9 @@ UID-scoped probes using the same runtime-resolved HTTPS destination observed the
 
 A five-minute locked, USB-connected observation passed 48 additional DNS queries with unchanged daemon/tunnel identities. This was ordinary screen-off testing, not forced deep Doze. Temporary firewall fault rules and diagnostic files were removed, original radio settings restored, and root mode left running. Auditing the earlier repair found the 619 expected module payloads and 2,146 denylist entries unchanged; the approved Thanox delegate setting remained disabled.
 
-**Not run:** separate image/video-send acceptance and user-confirmed timing for a fresh notification in this final locked trial. Three file transfers and the Idlefish region correction were explicitly confirmed; an existing notification record alone is not evidence that the newly requested notification arrived promptly.
+The user subsequently confirmed that the requested fresh WeChat notification appeared within five seconds while the phone remained locked. Together with the three confirmed file transfers and corrected Idlefish region display, this completes the reported application-level acceptance checks. Notification timing is user-reported; no exact sender timestamp or event-to-notification interval was established for this trial.
+
+**Not run:** separate image/video-send acceptance.
 
 ## Build and identity
 
