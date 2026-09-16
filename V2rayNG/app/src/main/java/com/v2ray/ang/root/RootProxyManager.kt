@@ -38,9 +38,9 @@ object RootProxyManager {
     private val bypassCidrs = RootRulePlan.bypassCidrsV4
     private val bypassCidrsV6 = RootRulePlan.bypassCidrsV6
 
-    fun start(context: Context): Boolean {
+    internal fun start(context: Context, appPolicy: RootRulePlan.AppPolicy): Boolean {
         if (!teardown(context)) return false
-        val script = buildTun2socksSetup(context) ?: return false
+        val script = buildTun2socksSetup(context, appPolicy = appPolicy) ?: return false
         val result = RootShell.runScript(context, "setup_rules.sh", script)
         if (!result.success) {
             LogUtil.e(AppConfig.TAG, "RootProxyManager: setup failed, rolling back:\n${result.output}")
@@ -78,9 +78,19 @@ object RootProxyManager {
         File(directory, "teardown_rules.sh").writeText(buildTeardown(context))
     }
 
-    fun refreshDns(context: Context, netId: Int): Boolean = RootShell.runScript(
+    internal fun resolveAppPolicy(context: Context): RootRulePlan.AppPolicy {
+        val enabled = MmkvManager.decodeSettingsBool(AppConfig.PREF_PER_APP_PROXY)
+        val bypass = MmkvManager.decodeSettingsBool(AppConfig.PREF_BYPASS_APPS)
+        val packages = if (enabled) {
+            MmkvManager.decodeSettingsStringSet(AppConfig.PREF_PER_APP_PROXY_SET)?.toList().orEmpty()
+        } else emptyList()
+        val uids = PackageUidResolver.packageNamesToUids(context, packages, refresh = true)
+        return RootRulePlan.AppPolicy(enabled, bypass, uids)
+    }
+
+    internal fun refreshDns(context: Context, netId: Int, appPolicy: RootRulePlan.AppPolicy): Boolean = RootShell.runScript(
         context, "refresh_dns.sh", RootRulePlan.operationPreamble() + RootRulePlan.dns(
-            context.applicationInfo.uid, SettingsManager.getLocalDnsPort(), netId, appendHook = false),
+            context.applicationInfo.uid, SettingsManager.getLocalDnsPort(), netId, appendHook = false, policy = appPolicy),
     ).success
 
     private fun teardown(context: Context): Boolean {
@@ -125,6 +135,7 @@ object RootProxyManager {
         context: Context,
         captureDeviceTraffic: Boolean = true,
         forceLanShare: Boolean = false,
+        appPolicy: RootRulePlan.AppPolicy = RootRulePlan.AppPolicy(false, false, emptyList()),
     ): String? {
         val bin = File(context.applicationInfo.nativeLibraryDir, AppConfig.ROOT_TUN2SOCKS_BIN)
         if (!bin.exists()) {
@@ -153,14 +164,9 @@ object RootProxyManager {
         val cfgPath = cfgFile.absolutePath
 
         // Per-app proxy/bypass (mirrors what VpnService does via allowed/disallowed apps).
-        val perAppEnabled = MmkvManager.decodeSettingsBool(AppConfig.PREF_PER_APP_PROXY)
-        val bypassApps = MmkvManager.decodeSettingsBool(AppConfig.PREF_BYPASS_APPS)
-        val selectedUids = if (perAppEnabled) {
-            val pkgs = MmkvManager.decodeSettingsStringSet(AppConfig.PREF_PER_APP_PROXY_SET)?.toList().orEmpty()
-            if (pkgs.isNotEmpty()) PackageUidResolver.packageNamesToUids(context, pkgs) else emptyList()
-        } else {
-            emptyList()
-        }
+        val perAppEnabled = appPolicy.enabled
+        val bypassApps = appPolicy.bypass
+        val selectedUids = appPolicy.selectedUids
 
         val connectivity = context.getSystemService(ConnectivityManager::class.java)
         val netId = connectivity.activeNetwork?.toString()?.toIntOrNull() ?: 0
@@ -200,7 +206,7 @@ object RootProxyManager {
             appendLine("ip rule add fwmark $MARK table $TABLE priority $PRIORITY")
             // mark the device's own packets into the tun (Root mode only)
             if (captureDeviceTraffic) {
-                append(RootRulePlan.dns(appUid, SettingsManager.getLocalDnsPort(), netId, appendHook = true))
+                append(RootRulePlan.dns(appUid, SettingsManager.getLocalDnsPort(), netId, appendHook = true, policy = appPolicy))
                 append(RootRulePlan.capture(false, false, CHAIN, appUid,
                     perAppEnabled, bypassApps, selectedUids))
             }

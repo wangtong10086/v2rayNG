@@ -16,7 +16,11 @@ import java.util.concurrent.TimeUnit
 import kotlin.concurrent.thread
 
 /** One root helper, owned and closed by CoreRootService. All calls run on its serialized IO job. */
-internal class RootDnsSession(private val context: Context, private val onFailure: () -> Unit) : AutoCloseable {
+internal class RootDnsSession(
+    private val context: Context,
+    private val appPolicy: RootRulePlan.AppPolicy,
+    private val onFailure: () -> Unit,
+) : AutoCloseable {
     @Volatile private var process: Process? = null
     private var reader: Thread? = null
     private val replies = LinkedBlockingQueue<String>(16)
@@ -72,7 +76,7 @@ internal class RootDnsSession(private val context: Context, private val onFailur
             .put("privateDnsOff", privateDns == "off")
         val signature = command.toString() + properties.dnsServers.joinToString { it.hostAddress.orEmpty() }
         if (signature == fingerprint) return true
-        check(RootProxyManager.refreshDns(context, netId)) { "Root DNS routing update failed" }
+        check(RootProxyManager.refreshDns(context, netId, appPolicy)) { "Root DNS routing update failed" }
         request(command)
         fingerprint = signature
         return true

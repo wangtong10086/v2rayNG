@@ -13,11 +13,12 @@ object PackageUidResolver {
     val packageUidMap: Map<String, String>
         get() = packageUidCache
 
-    fun packageNamesToUids(context: Context, packageNames: List<String>): List<String> {
+    fun packageNamesToUids(context: Context, packageNames: List<String>, refresh: Boolean = false): List<String> {
         return packageNames.mapNotNull { pkg ->
-            packageUidCache[pkg] ?: resolveUid(context, pkg)?.also { uid ->
-                packageUidCache[pkg] = uid
-            }
+            // A new root session must observe reinstalls and the current Context's user.
+            val uid = if (refresh) resolveUid(context, pkg) else packageUidCache[pkg] ?: resolveUid(context, pkg)
+            if (uid != null) packageUidCache[pkg] = uid else if (refresh) packageUidCache.remove(pkg)
+            uid
         }
     }
 
@@ -42,8 +43,8 @@ object PackageUidResolver {
             val uid = context.packageManager.getPackageUid(packageName, 0).toString()
             LogUtil.d(AppConfig.TAG, "Package: $packageName -> UID: $uid")
             uid
-        } catch (_: PackageManager.NameNotFoundException) {
-            LogUtil.w(AppConfig.TAG, "Package not found: $packageName")
+        } catch (e: PackageManager.NameNotFoundException) {
+            LogUtil.w(AppConfig.TAG, "Package UID resolution: package not found: $packageName", e)
             null
         }
     }

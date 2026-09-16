@@ -5,6 +5,14 @@ import com.v2ray.ang.AppConfig
 
 /** Deterministic device-capture rules. Android netId/permission bits remain intact. */
 internal object RootRulePlan {
+    /** One root service acquisition owns this snapshot, including later DNS reconciliations. */
+    class AppPolicy(val enabled: Boolean, val bypass: Boolean, selected: List<String>) {
+        val selectedUids: List<String> = selected.mapNotNull { it.toIntOrNull() }
+            .filter { it >= 0 }.distinct().sorted().map { it.toString() }
+        val dnsBypassUids: List<String>
+            get() = if (enabled && bypass) selectedUids else emptyList()
+    }
+
     private val markHex = AppConfig.ROOT_MARK_ROUTE.toString(16).padStart(8, '0')
     val MARK = "0x$markHex/0x$markHex"
     const val DNS_CHAIN = AppConfig.ROOT_DNS_OUTPUT_CHAIN
@@ -114,9 +122,17 @@ internal object RootRulePlan {
         }
     }
 
-    fun dns(appUid: Int, port: Int, netId: Int, appendHook: Boolean): String =
+    fun dns(
+        appUid: Int, port: Int, netId: Int, appendHook: Boolean,
+        policy: AppPolicy,
+    ): String =
         batch("iptables-restore", "nat", DNS_CHAIN) {
             appendLine("-A $DNS_CHAIN -m owner --uid-owner $appUid -j RETURN")
+            // Only app-owned DNS sockets carry this UID. Android netd's shared queries
+            // retain the core's ordered domain policy, not an inferred originating app.
+            policy.dnsBypassUids.forEach {
+                appendLine("-A $DNS_CHAIN -m owner --uid-owner $it -j RETURN")
+            }
             appendLine("-A $DNS_CHAIN -d 100.64.0.0/10 -j RETURN")
             appendLine("-A $DNS_CHAIN -d 127.0.0.0/8 -j RETURN")
             // netd carries the requesting network's netId. Leave IMS/non-default networks alone.

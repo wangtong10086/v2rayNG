@@ -8,6 +8,26 @@ import org.junit.Assert.*
 import org.junit.Test
 
 class DnsRoutingPlanTest {
+    @Test fun `explicit direct services finish domestic failover before broader proxy rules`() {
+        val directDomains = listOf("geosite:tencent", "geosite:alibaba")
+        val plan = DnsRoutingPlan.build(listOf(
+            RoutingDomainRule(directDomains, "direct"),
+            RoutingDomainRule(listOf("geosite:google"), "proxy"),
+            RoutingDomainRule(listOf("geosite:cn"), "direct")),
+            listOf("223.5.5.5", "119.29.29.29"), listOf("https://1.1.1.1/dns-query"))
+        val servers = plan.servers.map { it as V2rayConfig.DnsBean.ServersBean }
+        assertEquals(directDomains, servers[0].domains)
+        assertEquals(directDomains, servers[1].domains)
+        assertEquals(false, servers[0].finalQuery)
+        assertEquals(true, servers[1].finalQuery)
+        assertEquals(servers[0].tag, servers[1].tag)
+        assertTrue(plan.directTags.contains(servers[0].tag))
+        assertEquals(listOf("geosite:google"), servers[2].domains)
+        assertFalse(plan.directTags.contains(servers[2].tag))
+        assertTrue(servers.take(5).all { it.skipFallback == true })
+        assertNull(servers.last().domains)
+    }
+
     @Test fun `private names use network DNS without sending public China names there`() {
         val plan = DnsRoutingPlan.build(listOf(RoutingDomainRule(listOf("geosite:private", "geosite:cn"), "direct")),
             listOf("223.5.5.5"), listOf("https://1.1.1.1/dns-query"), listOf("192.168.1.1"))

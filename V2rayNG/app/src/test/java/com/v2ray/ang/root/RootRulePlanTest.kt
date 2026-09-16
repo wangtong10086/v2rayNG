@@ -61,13 +61,60 @@ class RootRulePlanTest {
         }
     }
     @Test fun `DNS captures both transports but leaves tailnet and other network IDs alone`() {
-        val script = RootRulePlan.dns(10208, 10853, 106, false)
+        val script = RootRulePlan.dns(10208, 10853, 106, false,
+            RootRulePlan.AppPolicy(false, false, emptyList()))
         assertTrue(script.contains("--mark 106/0xffff -p udp --dport 53"))
         assertTrue(script.contains("--mark 106/0xffff -p tcp --dport 53"))
         assertTrue(script.contains("--mark 0/0xffff"))
         assertTrue(script.contains("-d 100.64.0.0/10 -j RETURN"))
         assertFalse(script.contains("-A OUTPUT"))
         assertFalse(script.contains("MARK --set"))
+    }
+    @Test fun `app bypass precedes DNS interception on startup and network refresh`() {
+        val policy = RootRulePlan.AppPolicy(true, true, listOf("10421", "10422", "10421", "invalid", "-1"))
+        for ((netId, hook) in listOf(106 to true, 109 to false)) {
+            val script = RootRulePlan.dns(10208, 10853, netId, hook, policy)
+            for (uid in listOf("10421", "10422")) {
+                val exemption = "-A ${RootRulePlan.DNS_CHAIN} -m owner --uid-owner $uid -j RETURN"
+                assertEquals(1, script.lines().count { it == exemption })
+                assertTrue(script.indexOf(exemption) < script.indexOf("-j DNAT"))
+            }
+            assertEquals(hook, script.contains("-A OUTPUT"))
+            assertTrue(script.contains("--mark $netId/0xffff -p udp --dport 53"))
+            assertTrue(script.contains("--mark $netId/0xffff -p tcp --dport 53"))
+            assertFalse(script.contains("uid-owner -1"))
+            // Shared netd DNS must still reach the ordered domain policy.
+            assertFalse(script.contains("uid-owner 0-9999"))
+        }
+    }
+    @Test fun `disabled and proxy-only app selections never turn into DNS bypasses`() {
+        for (policy in listOf(
+            RootRulePlan.AppPolicy(false, true, listOf("10421")),
+            RootRulePlan.AppPolicy(true, false, listOf("10421")),
+            RootRulePlan.AppPolicy(true, true, emptyList()),
+        )) {
+            val script = RootRulePlan.dns(10208, 10853, 106, false, policy)
+            assertFalse(script.contains("uid-owner 10421"))
+            assertTrue(script.contains("-j DNAT"))
+        }
+    }
+    @Test fun `one detached app snapshot supplies IPv4 IPv6 and DNS rules`() {
+        val selection = mutableListOf("10421", "010421", "invalid", "-1")
+        val policy = RootRulePlan.AppPolicy(true, true, selection)
+        selection.clear()
+        selection.add("10422")
+        assertEquals(listOf("10421"), policy.selectedUids)
+        for ((ipv6, reject) in listOf(false to false, true to false, true to true)) {
+            val script = RootRulePlan.capture(ipv6, reject, "TEST", 10208,
+                policy.enabled, policy.bypass, policy.selectedUids)
+            assertTrue(script.contains("uid-owner 10421 -j RETURN"))
+            assertFalse(script.contains("uid-owner 10422"))
+        }
+        val refresh = RootRulePlan.dns(10208, 10853, 109, false, policy)
+        assertTrue(refresh.contains("uid-owner 10421 -j RETURN"))
+        assertFalse(refresh.contains("uid-owner 10422"))
+        val restarted = RootRulePlan.AppPolicy(true, true, selection)
+        assertEquals(listOf("10422"), restarted.dnsBypassUids)
     }
     @Test fun `preflight rejects foreign state and lock errors before acquisition`() {
         fun run(ip: String, firewallStatus: Int) = RootProcessRunner.run(

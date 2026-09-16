@@ -60,10 +60,11 @@ class CoreRootService : Service(), ServiceControl {
                     check(CoreServiceManager.startCoreLoop(null)) { "Root core start failed" }
                     ensureActive()
                     RootProxyManager.prepare(this@CoreRootService)
-                    dns = RootDnsSession(this@CoreRootService) { stopService() }
+                    val appPolicy = RootProxyManager.resolveAppPolicy(this@CoreRootService)
+                    dns = RootDnsSession(this@CoreRootService, appPolicy) { stopService() }
                     dns?.start()
                     ensureActive()
-                    check(RootProxyManager.start(this@CoreRootService)) { "Root rule setup failed" }
+                    check(RootProxyManager.start(this@CoreRootService, appPolicy)) { "Root rule setup failed" }
                     ensureActive()
                     check(dns?.refresh() == true) { "Root network DNS unavailable" }
                     ensureActive()
