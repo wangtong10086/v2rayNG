@@ -124,10 +124,12 @@ object NotificationManager {
         // Root initializes the core on its IO worker, after entering foreground here.
         if (owner != null) {
             val channelId = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                val manager = owner.getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
-                manager.createNotificationChannel(NotificationChannel(
-                    AppConfig.RAY_NG_CHANNEL_ID, AppConfig.RAY_NG_CHANNEL_NAME, NotificationManager.IMPORTANCE_LOW,
-                ))
+                NotificationHelper.ensureNotificationChannel(
+                    context = owner,
+                    channelId = AppConfig.RAY_NG_CHANNEL_ID,
+                    channelNameRes = R.string.notification_channel_service,
+                    importance = NotificationManager.IMPORTANCE_LOW,
+                )
                 AppConfig.RAY_NG_CHANNEL_ID
             } else ""
             val notification = mBuilder?.build() ?: NotificationCompat.Builder(owner, channelId)
