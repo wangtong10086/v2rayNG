@@ -2,6 +2,18 @@
 
 This branch builds **v2rayNG Personal**, an independently installed app. Its root networking changes were developed on a rooted Xiaomi 13 running Android 16. The two application IDs can be installed together, but they share the default local proxy port and root resource names. Running the original root implementation can fail on the occupied port and its unconditional teardown can remove the personal app's capture chains. Use one active installation. On the test device, the original app was backed up and uninstalled at the owner's request after this conflict was reproduced.
 
+## Personal.3 upstream update
+
+Personal.3 merges upstream v2rayNG 2.3.14 (`aa4b0550`) into the personal root-network branch. It retains the independent application ID, serialized root lifecycle, DNS lease and ordered resolver policy, application bypass rules, UID refresh, and tailnet compatibility handling. The notification-channel merge uses upstream's localized channel helper while preserving immediate foreground entry for root startup. Personal JVM tests now use upstream's JUnit Jupiter runner.
+
+Native inputs are AndroidLibXrayLite v26.10.21 (`76a6e217`, Xray 26.10.21, Go 1.27.3) and HEV `c5584fec`. The official AAR matches the gitlink; both HEV artifacts were rebuilt with NDK 30.0.16248370. Release ZIP inspection confirms `libgojni.so`, `libhev-socks5-tunnel.so`, and `libhevsockstun.so` for all four declared ABIs.
+
+Validation on 2026-10-28: 38 focused personal/root tests and all 153 JVM tests passed. Kotlin compilation, Play Store debug/release assembly, and Play Store debug lint passed (zero errors; 327 warnings). On Android 16 / arm64, the signed release passed cold startup, duplicate foreground starts with an unchanged tunnel process, repeated stop, occupied-chain failure cleanup, recovery, foreground restart, and Wi-Fi disconnect/reconnect. DNS and HTTPS were checked after recovery and network reconciliation. Cellular data remained disabled as configured on the device.
+
+Deployment also verified six updated server profiles and one retained existing profile through the installed core. A proxy-server hostname required resolution through its own proxy DNS path; using that server's fixed IP removed the startup dependency. Server addresses, credentials, routing policy, backups, and signing material remain outside this repository. Signing used a new personal certificate after the original key could not be located, so installation required a verified data backup, reinstall, and restoration of app data and existing grants. Future updates must use the new certificate to preserve ordinary in-place upgrades.
+
+**Not run:** other device versions/ABIs, cellular handover, LAN/hotspot sharing, the complete VPN/proxy-only lifecycle matrix, the exhaustive upstream UI/accessibility matrix, deep Doze, and fresh WeChat/Idlefish application-level acceptance. The checks above verify the deployed root-mode update and do not replace the distinct historical checks below.
+
 ## Behavior
 
 Root startup now owns core startup, firewall acquisition, the physical-network DNS lease, and teardown in a serialized service lifetime. Startup reports success after routing and DNS are ready. Duplicate starts do not create additional tunnels; stopping cancels pending work and removes capture before stopping the core. Background restarts rebuild within the existing foreground service.
