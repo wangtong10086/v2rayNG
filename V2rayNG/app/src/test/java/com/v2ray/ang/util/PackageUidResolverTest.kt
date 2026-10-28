@@ -5,9 +5,9 @@ import android.content.pm.PackageManager
 import android.util.Log
 import com.tencent.mmkv.MMKV
 import com.v2ray.ang.handler.MmkvManager
-import org.junit.Assert.*
-import org.junit.BeforeClass
-import org.junit.Test
+import org.junit.jupiter.api.Assertions.*
+import org.junit.jupiter.api.BeforeAll
+import org.junit.jupiter.api.Test
 import org.mockito.Mockito.mockStatic
 import org.mockito.kotlin.mock
 import org.mockito.kotlin.whenever
@@ -43,7 +43,7 @@ class PackageUidResolverTest {
     }
 
     companion object {
-        @BeforeClass @JvmStatic fun initializeLogSettings() {
+        @BeforeAll @JvmStatic fun initializeLogSettings() {
             val settings = mock<MMKV>()
             mockStatic(MMKV::class.java).use {
                 it.`when`<MMKV> { MMKV.mmkvWithID("SETTING", MMKV.MULTI_PROCESS_MODE) }.thenReturn(settings)

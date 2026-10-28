@@ -1,7 +1,7 @@
 package com.v2ray.ang.root
 
-import org.junit.Assert.*
-import org.junit.Test
+import org.junit.jupiter.api.Assertions.*
+import org.junit.jupiter.api.Test
 
 class RootRulePlanTest {
     @Test fun `UID rules are unique and keep Android marks`() {
